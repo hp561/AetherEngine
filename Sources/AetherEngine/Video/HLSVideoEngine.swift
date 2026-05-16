@@ -1497,8 +1497,15 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         return (resolution.0, resolution.1)
     }
     var masterVideoRange: HLSVideoRange? { videoRange }
-    var masterBandwidth: Int? { 5_000_000 }
-    var masterAverageBandwidth: Int? { 5_000_000 }
+    // 200 Mbps ceiling — single-variant VOD; BANDWIDTH is informational
+    // only (no ABR switching), but AVPlayer logs CoreMediaErrorDomain
+    // -12318 'Segment exceeds specified bandwidth for variant' if the
+    // declared value is below actual segment bitrate, which it routinely
+    // was at 5 Mbps for 4K HDR (typical 40-80 Mbps) and lossless-audio
+    // FLAC-bridge output (10-30 MB segments). 200 Mbps covers any
+    // realistic remux output without overpromising network usage.
+    var masterBandwidth: Int? { 200_000_000 }
+    var masterAverageBandwidth: Int? { 200_000_000 }
     var masterFrameRate: Double? { frameRate }
     var masterHDCPLevel: String? { hdcpLevel }
     var masterClosedCaptions: String? { "NONE" }
