@@ -14,11 +14,14 @@ let package = Package(
             name: "AetherEngine",
             targets: ["AetherEngine"]
         ),
-        // Standalone CLI used for offline reproduction of the host-side
-        // HLSVideoEngine playback symptoms on macOS, without going
-        // through TestFlight + Apple TV. Builds only on macOS in
-        // practice (Apple platform reqs match the lib target).
-        .executable(name: "aetherctl", targets: ["aetherctl"]),
+        // aetherctl product removed: the target uses Foundation.Process
+        // which is unavailable on tvOS/iOS, but the executable target
+        // was declared without a platform restriction. SPM consumers
+        // building for tvOS/iOS were pulled into compiling it and
+        // failed with `cannot find 'Process' in scope`. The aetherctl
+        // target itself is preserved below so `swift build` on macOS
+        // still produces the CLI; only the published product surface
+        // changes.
     ],
     dependencies: [
         // Minimal FFmpeg build (avcodec, avformat, avutil, swresample only).
