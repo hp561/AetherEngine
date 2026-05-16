@@ -137,9 +137,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         /// through the FLAC bridge avoids a "stream-copy header write
         /// failed, retrying with FLAC bridge" round-trip on every
         /// Opus source.
+        ///
+        /// MP3 joins the bridge set for the same reason: stream-copy
+        /// into fMP4 uses the spec-correct `mp4a` sample entry with
+        /// OTI 0x34 (i.e. `mp4a.40.34`), but AVPlayer treats `mp4a`
+        /// as AAC and fails to decode the MP3 frames, returning
+        /// AVFoundation -11829 / CoreMedia -12848 ("Cannot Open").
+        /// Verified empirically against an MP3-in-mov source.
         var requiresBridge: Bool {
             switch self {
-            case .opus, .truehd, .dts, .vorbis, .pcm, .mp2: return true
+            case .opus, .mp3, .truehd, .dts, .vorbis, .pcm, .mp2: return true
             default: return false
             }
         }
