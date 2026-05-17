@@ -282,7 +282,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     // MARK: - Public API
 
-    public func start() throws -> URL {
+    /// Start the engine.
+    ///
+    /// - Parameter startPositionSeconds: When > 0, the segment producer
+    ///   begins emitting fragments at the segment containing this time
+    ///   (the largest plan index whose `startSeconds <= start`). The
+    ///   resulting `init.mp4` describes a stream anchored at that
+    ///   segment's tfdt, so AVPlayer's subsequent `seek(startPosition)`
+    ///   inside `NativeAVPlayerHost.load` lands on a cache hit instead
+    ///   of triggering the producer-restart path (which produces an
+    ///   init/fragment mismatch AVPlayer can't reconcile on a cold
+    ///   load). For `start == 0` the behaviour is identical to before
+    ///   this parameter existed: producer at baseIndex 0, demuxer
+    ///   positioned at the file head.
+    public func start(startPositionSeconds: Double = 0) throws -> URL {
         guard demuxer == nil else { throw HLSVideoEngineError.alreadyStarted }
 
         // 1. Open the source.
@@ -598,11 +611,44 @@ public final class HLSVideoEngine: @unchecked Sendable {
             : nil
         let hdcpLevel: String? = (dvVariant != .none) ? "TYPE-1" : nil
 
-        // 5. Position the demuxer at the file's first packet so the
-        //    producer's pump starts from byte zero. The cue prewarm
-        //    above moved the cursor mid-file; libavformat's index is
-        //    populated now, this seek-to-0 is cheap.
-        dem.seek(to: 0)
+        // 5. Resolve the initial producer base index from the caller-
+        //    supplied `startPositionSeconds`, and position the demuxer
+        //    accordingly. For start == 0 this preserves the original
+        //    "producer at seg0, demuxer at file head" behaviour. For
+        //    start > 0 we map to the largest plan index whose start is
+        //    <= the requested time, then seek the demuxer slightly
+        //    earlier (the producer's scan-forward IDR search will then
+        //    align to the planned keyframe). Producing init.mp4 from a
+        //    producer anchored at the resume segment makes its mvhd /
+        //    tfdt accounting self-consistent with the fragments it
+        //    emits — AVPlayer's eventual `seek(startPosition)` lands
+        //    on a cache hit and plays without going through the
+        //    producer-restart path.
+        let initialBaseIndex: Int = {
+            guard startPositionSeconds > 0, !plan.isEmpty else { return 0 }
+            var idx = 0
+            for (i, seg) in plan.enumerated() {
+                if seg.startSeconds <= startPositionSeconds {
+                    idx = i
+                } else {
+                    break
+                }
+            }
+            return idx
+        }()
+        if initialBaseIndex > 0 {
+            let backBias = 0.5
+            let seekTo = max(0, plan[initialBaseIndex].startSeconds - backBias)
+            dem.seek(to: seekTo)
+            EngineLog.emit(
+                "[HLSVideoEngine] start at non-zero: startPositionSeconds=\(String(format: "%.3f", startPositionSeconds)) → "
+                + "baseIndex=\(initialBaseIndex) (plan.startSeconds=\(String(format: "%.3f", plan[initialBaseIndex].startSeconds))s, "
+                + "dem.seek=\(String(format: "%.3f", seekTo))s)",
+                category: .session
+            )
+        } else {
+            dem.seek(to: 0)
+        }
 
         // 6. Build the segment cache + producer. The producer's
         //    constructor calls avformat_write_header which opens the
@@ -749,7 +795,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             streamCopyAudio: streamCopyAudio,
             sourceAudioStreamIndex: audioStreamIndex,
             sourceAudioStream: audioStreamIndex >= 0 ? dem.stream(at: audioStreamIndex) : nil,
-            audioHLSCodecs: &audioHLSCodecs
+            audioHLSCodecs: &audioHLSCodecs,
+            initialBaseIndex: initialBaseIndex
         )
         self.producer = prod
 
@@ -963,7 +1010,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         streamCopyAudio: HLSSegmentProducer.AudioConfig?,
         sourceAudioStreamIndex: Int32,
         sourceAudioStream: UnsafeMutablePointer<AVStream>?,
-        audioHLSCodecs: inout String?
+        audioHLSCodecs: inout String?,
+        initialBaseIndex: Int = 0
     ) throws -> HLSSegmentProducer {
         // Detect if the source is EAC3+JOC Atmos so we can flag any
         // stream-copy → FLAC-bridge fallback as an Atmos downgrade.
@@ -985,7 +1033,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if !preferBridge, let cfg = streamCopyAudio {
             self.savedAudioConfig = cfg
             do {
-                let prod = try makeProducer(baseIndex: 0)
+                let prod = try makeProducer(baseIndex: initialBaseIndex)
                 if sourceIsAtmos {
                     EngineLog.emit(
                         "[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged, MAT 2.0 passthrough intact",
@@ -1040,7 +1088,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     self.savedAudioConfig = cfg
                     self.audioBridge = bridge
                     do {
-                        let prod = try makeProducer(baseIndex: 0)
+                        let prod = try makeProducer(baseIndex: initialBaseIndex)
                         audioHLSCodecs = "fLaC"
                         return prod
                     } catch {
@@ -1065,7 +1113,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.savedAudioConfig = nil
         self.audioBridge = nil
         audioHLSCodecs = nil
-        return try makeProducer(baseIndex: 0)
+        return try makeProducer(baseIndex: initialBaseIndex)
     }
 
     /// Tear down the current producer, seek the demuxer to the start

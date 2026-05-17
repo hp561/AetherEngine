@@ -570,7 +570,13 @@ public final class AetherEngine: ObservableObject {
         session.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }
         }
-        let playbackURL = try session.start()
+        // Pass the resume offset through so the producer is built
+        // anchored at the resume segment. The eventual AVPlayer.seek
+        // inside NativeAVPlayerHost.load then lands on a cache hit
+        // instead of triggering the producer-restart path (whose
+        // init/fragment mismatch AVPlayer can't reconcile on a cold
+        // load).
+        let playbackURL = try session.start(startPositionSeconds: startPosition ?? 0)
         self.nativeVideoSession = session
         self.playlistOriginOffsetSeconds = session.firstKeyframeSeconds
 
