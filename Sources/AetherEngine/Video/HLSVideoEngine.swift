@@ -830,7 +830,27 @@ public final class HLSVideoEngine: @unchecked Sendable {
         try srv.start()
         self.server = srv
 
-        // 8. Kick the pump. Producer is now writing init + segments
+        // 8. Seed the cache window. SegmentCache.currentTargetIndex
+        //    defaults to -1 ("no AVPlayer request yet"), which means
+        //    pruneOutsideWindow runs against the window
+        //    [-1 - backwardWindow, -1 + forwardWindow]. For a producer
+        //    starting at baseIndex=0 the natural emissions (seg 0..N)
+        //    fit comfortably in that range; for baseIndex > 0 they do
+        //    NOT — seg-baseIndex would be evicted on the same store
+        //    call that wrote it. By the time AVPlayer's first request
+        //    declared the target via the provider, the cache would be
+        //    empty and provider would spuriously fire restartProducer,
+        //    which reintroduces the init/fragment-mismatch fragility
+        //    this whole non-zero-start path exists to avoid.
+        //
+        //    Set the target BEFORE prod.start() so the producer's
+        //    first store() lands inside a window centered on the
+        //    resume segment.
+        if initialBaseIndex > 0 {
+            segmentCache.declareTarget(initialBaseIndex)
+        }
+
+        // 9. Kick the pump. Producer is now writing init + segments
         //    into the cache as fast as the demuxer can feed packets;
         //    AVPlayer's HTTP fetches block on cache.fetch until the
         //    requested index lands.
@@ -1172,6 +1192,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let seekTo = max(0, plan[baseIndex].startSeconds - backBias)
         demuxer?.seek(to: seekTo)
         audioBridge?.startSegment()
+
+        // Seed the cache target to the resume baseIndex BEFORE the
+        // new producer's pump starts. Without this, the producer's
+        // first store() (for seg-baseIndex) lands outside the default
+        // window centered on -1 and gets immediately pruned, leading
+        // to the same spurious restartProducer cascade that the
+        // start(startPositionSeconds:) path also guards against.
+        if baseIndex > 0 {
+            cache?.declareTarget(baseIndex)
+        }
 
         do {
             let newProd = try makeProducer(baseIndex: baseIndex)
