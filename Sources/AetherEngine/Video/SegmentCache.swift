@@ -65,7 +65,26 @@ final class SegmentCache {
 
     func setInit(_ data: Data) {
         condition.lock()
-        initSegment = data
+        // First-init-wins. The producer-restart path (engaged on
+        // out-of-cache seeks, see HLSVideoEngine.restartProducer)
+        // creates a fresh hls muxer which calls avformat_write_header
+        // and emits a NEW init.mp4 — but AVPlayer cached the original
+        // init.mp4 at session start and does not refetch on segment
+        // jumps. If we let the new init overwrite the original, the
+        // restarted producer's fragments (tfdt-aligned by the shift
+        // accounting) would be paired with a stale init reference on
+        // AVPlayer's side, causing it to never reach readyToPlay after
+        // any out-of-cache scrub or non-zero resume.
+        //
+        // The original init's mvex/trex defaults are permissive
+        // (sample sizes/durations are overridden by trun in each
+        // moof), so the restarted producer's segments parse cleanly
+        // against the original init as long as the source codec
+        // params haven't changed — which they don't, since we're
+        // remuxing the same source.
+        if initSegment == nil {
+            initSegment = data
+        }
         condition.broadcast()
         condition.unlock()
     }
