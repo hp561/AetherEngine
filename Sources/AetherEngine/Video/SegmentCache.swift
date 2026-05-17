@@ -56,7 +56,18 @@ final class SegmentCache {
     /// it into the player's actual region.
     private var currentTargetIndex: Int = -1
 
-    init(forwardWindow: Int = 20, backwardWindow: Int = 15) {
+    init(forwardWindow: Int = 8, backwardWindow: Int = 8) {
+        // Defaults tightened from 20/15 → 8/8 (35 → 16 segments
+        // resident peak). Memory-conservative for high-bitrate content
+        // (e.g. 1080p HEVC + FLAC bridge, 10-22 MB segments): 16 ×
+        // ~15 MB avg ≈ 240 MB peak cache vs. ~500-700 MB at the old
+        // defaults. Forward cache (8 segments × 4 s ≈ 32 s) sits
+        // comfortably above AVPlayer's typical
+        // `preferredForwardBufferDuration` so the player never blocks
+        // on us; backward window (8 segments × 4 s ≈ 32 s) keeps
+        // quick rewinds in-cache. Longer scrubs trigger the producer
+        // restart path, which is now valid across restarts (see
+        // setInit "first-init-wins").
         self.forwardWindow = forwardWindow
         self.backwardWindow = backwardWindow
     }
