@@ -1116,6 +1116,85 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return try makeProducer(baseIndex: initialBaseIndex)
     }
 
+    /// Public fast-path reanchor for hosts that want to point the
+    /// engine at a new source position without paying the cost of a
+    /// full `engine.stop()` + new-session bring-up.
+    ///
+    /// Tears down only the producer (the demuxer, segment plan,
+    /// audio bridge, local HTTP server, and provider all stay live),
+    /// fully clears the segment cache so AVPlayer's next
+    /// `replaceCurrentItem(with:)` against the same loopback URL gets
+    /// a fresh init.mp4 + fragments matched to the new baseIndex, and
+    /// spins up a new producer anchored there. The host is then free
+    /// to swap its AVPlayer's current item (same URL is fine — a new
+    /// `AVURLAsset` against the same URL re-fetches the playlist +
+    /// init + first segment, which is what we want).
+    ///
+    /// Resolves the segment index from `targetSeconds` using the same
+    /// "largest plan index whose startSeconds ≤ target" rule
+    /// `start(startPositionSeconds:)` uses, so the behaviour is
+    /// identical to a fresh session.start at the same offset, just
+    /// ~500ms faster.
+    public func reanchor(at targetSeconds: Double) throws {
+        guard let plan = self.cache != nil ? Optional(self.segmentPlan) : nil, !plan.isEmpty else {
+            throw HLSVideoEngineError.notStarted
+        }
+        let baseIndex: Int = {
+            guard targetSeconds > 0 else { return 0 }
+            var idx = 0
+            for (i, seg) in plan.enumerated() {
+                if seg.startSeconds <= targetSeconds {
+                    idx = i
+                } else {
+                    break
+                }
+            }
+            return idx
+        }()
+        let reanchorStart = DispatchTime.now()
+
+        restartLock.lock()
+        defer { restartLock.unlock() }
+
+        if let old = producer {
+            old.stop()
+            _ = old.waitForFinish(timeout: 5.0)
+        }
+        producer = nil
+
+        // Clear the cache (entries + init) so the new producer's
+        // emissions are the only bytes AVPlayer's fresh item sees.
+        cache?.reset()
+
+        // Seek demuxer to slightly before the planned anchor; the
+        // producer's IDR scan-forward handles final alignment.
+        let backBias = 0.5
+        let seekTo = max(0, plan[baseIndex].startSeconds - backBias)
+        demuxer?.seek(to: seekTo)
+        audioBridge?.startSegment()
+
+        do {
+            let newProd = try makeProducer(baseIndex: baseIndex)
+            producer = newProd
+            newProd.start()
+        } catch {
+            EngineLog.emit(
+                "[HLSVideoEngine] reanchor at \(String(format: "%.2f", targetSeconds))s failed: \(error)",
+                category: .session
+            )
+            throw error
+        }
+
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - reanchorStart.uptimeNanoseconds) / 1_000_000
+        EngineLog.emit(
+            "[HLSVideoEngine] reanchored at baseIndex=\(baseIndex) "
+            + "(target=\(String(format: "%.2f", targetSeconds))s, "
+            + "dem.seek=\(String(format: "%.2f", seekTo))s, "
+            + "took \(String(format: "%.0f", elapsedMs))ms)",
+            category: .session
+        )
+    }
+
     /// Tear down the current producer, seek the demuxer to the start
     /// of segment `idx`, and spin up a fresh producer with
     /// `baseIndex = idx`. Triggered by `VideoSegmentProvider` when

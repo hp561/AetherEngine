@@ -728,6 +728,33 @@ public final class AetherEngine: ObservableObject {
         try await load(url: url, startPosition: pos > 1 ? pos : nil, options: loadedOptions)
     }
 
+    /// Reanchor the running HLS session at a new source-time position
+    /// without tearing down the demuxer, segment plan, audio bridge,
+    /// or local HTTP server. Only the producer + segment cache are
+    /// rebuilt. Roughly ~500ms cheaper than `reloadAtCurrentPosition`
+    /// for the same outcome.
+    ///
+    /// After calling this, the host should immediately swap its
+    /// AVPlayer's current item with a fresh `AVPlayerItem` constructed
+    /// against the same loopback URL; the new item's playlist + init +
+    /// first segment fetches will all hit the freshly populated cache.
+    ///
+    /// No-op on the software (AV1) path — the SW host has its own
+    /// in-place seek that doesn't have the AVPlayer-side init.mp4
+    /// reconciliation problem this method exists to work around.
+    public func reanchor(to seconds: Double) async throws {
+        guard let session = nativeVideoSession else {
+            // SW path: defer to seek().
+            await seek(to: seconds)
+            return
+        }
+        let target = max(0, min(seconds, duration))
+        try session.reanchor(at: target)
+        // Keep our published clock in sync so the UI doesn't briefly
+        // show the old position while the host swaps its AVPlayer item.
+        currentTime = target
+    }
+
     public func seek(to seconds: Double) async {
         let target = max(0, min(seconds, duration))
         state = .seeking

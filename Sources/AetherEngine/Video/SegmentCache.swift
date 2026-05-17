@@ -56,18 +56,28 @@ final class SegmentCache {
     /// it into the player's actual region.
     private var currentTargetIndex: Int = -1
 
-    init(forwardWindow: Int = 8, backwardWindow: Int = 8) {
-        // Defaults tightened from 20/15 → 8/8 (35 → 16 segments
-        // resident peak). Memory-conservative for high-bitrate content
-        // (e.g. 1080p HEVC + FLAC bridge, 10-22 MB segments): 16 ×
-        // ~15 MB avg ≈ 240 MB peak cache vs. ~500-700 MB at the old
-        // defaults. Forward cache (8 segments × 4 s ≈ 32 s) sits
-        // comfortably above AVPlayer's typical
-        // `preferredForwardBufferDuration` so the player never blocks
-        // on us; backward window (8 segments × 4 s ≈ 32 s) keeps
-        // quick rewinds in-cache. Longer scrubs trigger the producer
-        // restart path, which is now valid across restarts (see
-        // setInit "first-init-wins").
+    init(forwardWindow: Int = 30, backwardWindow: Int = 30) {
+        // Defaults grown 8/8 → 30/30 (60 segments resident peak).
+        // Rationale: producer-restart in-place reliably causes
+        // init/fragment mismatch that AVPlayer can't reconcile (the
+        // first-init-wins workaround helps but doesn't fix all cold-
+        // load + far-seek combinations). The robust scrub strategy is
+        // to keep the user's likely seek range resident so an
+        // AVPlayer.seek lands on a cache hit without triggering
+        // restart. 60 segments × ~4 s ≈ 240 s = ±4 min of in-cache
+        // seek range, which covers the vast majority of user scrubs
+        // (skip intro, skip back 10 s, etc).
+        //
+        // Memory cost: 60 × ~7 MB avg ≈ 420 MB peak. Headroom on a
+        // 4 GB Apple TV 4K is comfortable; on memory-pressured devices
+        // the host can override via the init parameters (the AVPlayer
+        // path also installs a memory watchdog that flips to legacy if
+        // resident usage crosses a threshold).
+        //
+        // Truly far jumps (> ±4 min) still need a reanchor (see
+        // HLSVideoEngine.reanchor), but that's now rare in normal
+        // viewing — fast scrubbing inside the resident window is the
+        // hot path.
         self.forwardWindow = forwardWindow
         self.backwardWindow = backwardWindow
     }
@@ -113,6 +123,22 @@ final class SegmentCache {
         closed = true
         entries.removeAll(keepingCapacity: false)
         initSegment = nil
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    /// Reset cache state without closing it. Drops all entries and the
+    /// pinned init segment, and snaps `currentTargetIndex` back to
+    /// "no request yet" so the next `declareTarget` will set a fresh
+    /// window. Used by `HLSVideoEngine.reanchor` between tearing down
+    /// the old producer and building a fresh one — the new producer
+    /// emits its own init+segments unimpeded by leftover bytes from
+    /// the previous baseIndex.
+    func reset() {
+        condition.lock()
+        entries.removeAll(keepingCapacity: true)
+        initSegment = nil
+        currentTargetIndex = -1
         condition.broadcast()
         condition.unlock()
     }
